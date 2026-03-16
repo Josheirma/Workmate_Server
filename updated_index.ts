@@ -1,11 +1,16 @@
-import "../server/env";
+import dotenv from "dotenv";
+const result = dotenv.config({ path: ".env.local" });
+
+console.log("Server file loaded at:", new Date().toISOString());
+console.log("DOTENV RESULT:", result);
+console.log("DATABASE_URL:", process.env.DATABASE_URL);
 
 import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import cors from "cors";
-import { activateLicense } from "./routes/activate";
-import { purchaseSerial } from "./routes/purchase";
+import { activateLicense } from "../src/routes/activate";
+import { purchaseSerial } from "../src/routes/purchase";
 import { activateLimiter } from "./middleware/rateLimit";
 import { validateActivationInput } from "./middleware/validate";
 import licenseRoutes from "./utils/license";
@@ -17,8 +22,9 @@ app.use(cors({
   origin: "http://localhost:5173",
 }));
 
+// ⚠️ Webhook MUST be before express.json()
 app.use(licenseRoutes);
-app.use(express.json());
+app.use(express.json());       // ← added here, after licenseRoutes
 app.use(morgan("combined"));
 
 app.post("/activate", activateLimiter, validateActivationInput, activateLicense);
