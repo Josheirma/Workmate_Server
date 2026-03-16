@@ -63,10 +63,11 @@ router.post(
   "/api/stripe-webhook",
   express.raw({ type: "application/json" }) as RequestHandler,
   async (req: Request, res: Response): Promise<void> => {
+    console.log("hit checkout route");
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
     const resend = new Resend(process.env.RESEND_API_KEY as string);
     const sig = req.headers["stripe-signature"] as string;
-
+    console.log("hit checkout route2");
     let event: Stripe.Event;
     try {
       event = stripe.webhooks.constructEvent(
@@ -103,7 +104,7 @@ router.post(
 
         const { data, error } = await resend.emails.send({
           from: "onboarding@resend.dev",
-          to: email,
+          to: "joshuaeirm@gmail.com",
           subject: "Your WorkMate License Key",
           html: `
             <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
