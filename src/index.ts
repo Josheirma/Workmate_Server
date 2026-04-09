@@ -9,24 +9,27 @@ import fs from "fs";
 import { activateLicense } from "./routes/activate";
 import { purchaseSerial } from "./routes/purchase";
 import { activateLimiter } from "./middleware/rateLimit";
+import { purchaseLimiter } from "./middleware/rateLimit";
 import { validateActivationInput } from "./middleware/validate";
-import licenseRoutes from "./utils/license";
+import paypalRoutes from "./routes/paypal";
 
 const app = express();
 const FILES_DIR = path.resolve(__dirname, "../files");
 
 app.use(helmet());
 app.use(cors({ origin: "http://localhost:5173" }));
-
-// ✅ licenseRoutes FIRST — before express.json() — so webhook gets raw body
-app.use(licenseRoutes);
-
-// ✅ express.json() AFTER — for all other routes
 app.use(express.json());
 app.use(morgan("combined"));
 
+// PayPal routes
+app.use(paypalRoutes);
+
 app.post("/activate", activateLimiter, validateActivationInput, activateLicense);
-app.post("/purchase", purchaseSerial);
+
+//!!!!
+//app.post("/purchase", purchaseSerial);
+//!!!!
+app.post("/purchase", purchaseLimiter, validatePurchaseInput, purchaseSerial);
 
 app.get("/api/download/:filename", (req, res) => {
   const safeName = path.basename(req.params.filename);
