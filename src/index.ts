@@ -7,9 +7,7 @@ import cors from "cors";
 import path from "path";
 import fs from "fs";
 import { activateLicense } from "./routes/activate";
-import { purchaseSerial } from "./routes/purchase";
 import { activateLimiter } from "./middleware/rateLimit";
-import { purchaseLimiter } from "./middleware/rateLimit";
 import { validateActivationInput } from "./middleware/validate";
 import paypalRoutes from "./routes/paypal";
 
@@ -21,15 +19,10 @@ app.use(cors({ origin: "http://localhost:5173" }));
 app.use(express.json());
 app.use(morgan("combined"));
 
-// PayPal routes
+// PayPal routes (create-order + capture-order + email serial)
 app.use(paypalRoutes);
 
 app.post("/activate", activateLimiter, validateActivationInput, activateLicense);
-
-//!!!!
-//app.post("/purchase", purchaseSerial);
-//!!!!
-app.post("/purchase", purchaseLimiter, validatePurchaseInput, purchaseSerial);
 
 app.get("/api/download/:filename", (req, res) => {
   const safeName = path.basename(req.params.filename);

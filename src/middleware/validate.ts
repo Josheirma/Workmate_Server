@@ -4,10 +4,10 @@ export function validateActivationInput(req: Request, res: Response, next: NextF
   const { serial, machineID } = req.body
 
   if (!serial || !machineID)
-    return res.json({ success: false, error: "missing fields" })
+    return res.status(400).json({ success: false, error: "missing fields" })
 
   if (!/^WM-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(serial))
-    return res.json({ success: false, error: "invalid serial format" })
+    return res.status(400).json({ success: false, error: "invalid serial format" })
 
   next()
 }
