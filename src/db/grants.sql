@@ -1,7 +1,7 @@
 -- run this once, or re-run anytime permissions need fixing
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'workmate_app') THEN
-    CREATE USER workmate_app WITH PASSWORD 'pass123$';
+    CREATE USER workmate_app WITH PASSWORD 'pass123';
   END IF;
 END $$;
 
