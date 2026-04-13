@@ -123,7 +123,7 @@ router.post("/api/paypal/capture-order", async (req: Request, res: Response) => 
     await sendLicenseEmail(buyerEmail, serial)
 
     console.log(`PayPal purchase complete — email: ${buyerEmail}, serial: ${serial}`)
-    res.json({ success: true })
+    res.json({ success: true, serial })
   } catch (err) {
     console.error("PayPal capture-order error:", err)
     res.status(500).json({ error: "Failed to capture PayPal order" })
