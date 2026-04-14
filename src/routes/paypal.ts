@@ -1,133 +1,129 @@
 import { Request, Response, Router } from "express"
+import pool from "../db/pool"
 import { generateOnlineSerial } from "../utils/serial"
 import { sendLicenseEmail } from "../utils/mailer"
+import { idempotencyGuard } from "../middleware/idempotency"
 
 const router = Router()
 
-// PayPal sandbox API base URL — change to live when ready:
-// "https://api-m.paypal.com"
-const PAYPAL_API = "https://api-m.sandbox.paypal.com"
+const PAYPAL_API = process.env.NODE_ENV === "production"
+  ? "https://api-m.paypal.com"
+  : "https://api-m.sandbox.paypal.com"
 
-// credentials from .env file — never hardcode these
 const CLIENT_ID = process.env.PAYPAL_CLIENT_ID as string
-const SECRET    = process.env.PAYPAL_SECRET as string
+const SECRET    = process.env.PAYPAL_SECRET    as string
 
-// ─── Helper: get a temporary access token from PayPal ────────────────────────
-// PayPal doesn't let you call its API directly with CLIENT_ID + SECRET
-// you first swap them for a short-lived access token, then use that
+// Cache the access token — valid ~9 hrs, refresh 5 min before expiry.
+// Avoids a redundant auth round-trip on every request.
+let cachedToken:    string | null = null
+let tokenExpiresAt: number        = 0
+
 async function getAccessToken(): Promise<string> {
-  const res = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
+  if (cachedToken && Date.now() < tokenExpiresAt - 5 * 60 * 1000) return cachedToken
+  const res  = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      // Basic Auth — CLIENT_ID:SECRET encoded to base64 (standard format PayPal expects)
       Authorization: "Basic " + Buffer.from(`${CLIENT_ID}:${SECRET}`).toString("base64"),
     },
-    // tells PayPal we're a server authenticating directly (not on behalf of a user)
     body: "grant_type=client_credentials",
   })
   const data = await res.json()
-  return data.access_token // short-lived token, valid for ~9 hours
+  if (!data.access_token) throw new Error("PayPal auth failed")
+  cachedToken    = data.access_token
+  tokenExpiresAt = Date.now() + (data.expires_in ?? 32400) * 1000
+  return cachedToken!
 }
 
-// ─── Route 1: Create Order ────────────────────────────────────────────────────
-// called when user clicks the PayPal button
-// creates a pending order in PayPal and returns its ID
-// the PayPal button uses the ID to open the payment popup
+// ─── Create Order — no idempotency needed, PayPal handles it ─────────────────
 router.post("/api/paypal/create-order", async (req: Request, res: Response) => {
   try {
-    const accessToken = await getAccessToken()
-
+    const token = await getAccessToken()
     const response = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`, // use the token we just got
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({
-        intent: "CAPTURE", // means "charge the card immediately" (vs authorize only)
-        purchase_units: [
-          {
-            amount: {
-              currency_code: "USD",
-              value: "59.99", // price shown to user in PayPal popup
-            },
-            description: "WorkMate License", // shown on PayPal receipt
-          },
-        ],
-        application_context: {
-          //!!!!
-          shipping_preference: "NO_SHIPPING", // hides shipping address field (digital product)
-        },
+        intent: "CAPTURE",
+        purchase_units: [{ amount: { currency_code: "USD", value: "59.99" }, description: "WorkMate License" }],
+        application_context: { shipping_preference: "NO_SHIPPING" },
       }),
     })
-
     const order = await response.json()
-    res.json({ id: order.id }) // send order ID back to frontend so PayPal button can open popup
+    res.json({ id: order.id })
   } catch (err) {
-    console.error("PayPal create-order error:", err)
-    res.status(500).json({ error: "Failed to create PayPal order" })
+    console.error("[paypal/create-order]", err)
+    res.status(500).json({ error: "Failed to create order" })
   }
 })
 
-// ─── Route 2: Capture Order ───────────────────────────────────────────────────
-// called after user approves payment in the PayPal popup
-// "capture" means actually charge the money
-// then we generate a license serial and email it to the buyer
-router.post("/api/paypal/capture-order", async (req: Request, res: Response) => {
-  const { orderID, email } = req.body // orderID from PayPal, email optionally from frontend
+// ─── Capture Order — idempotency guard prevents duplicate serials on retries ──
+router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, res: Response) => {
+  const { orderID, email } = req.body
+  const finalize = res.locals.finalizeIdempotency
 
-  if (!orderID) {
-    res.status(400).json({ error: "orderID required" })
-    return
-  }
-
+  // Step 1: verify payment with PayPal
+  let capture: any
   try {
-    const accessToken = await getAccessToken()
-
-    // tell PayPal to finalize the payment and charge the buyer
+    const token = await getAccessToken()
     const response = await fetch(`${PAYPAL_API}/v2/checkout/orders/${orderID}/capture`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     })
-
-    const capture = await response.json()
-
-    // make sure payment actually went through before doing anything
-    if (capture.status !== "COMPLETED") {
-      res.status(400).json({ error: "Payment not completed", details: capture })
-      return
-    }
-
-    // try to get buyer email — first from frontend, then from PayPal's response
-    // PayPal returns it in different places depending on payment method
-    const buyerEmail =
-      email ||
-      capture.payment_source?.paypal?.email_address || // paid with PayPal account
-      capture.payer?.email_address                     // fallback
-
-    if (!buyerEmail) {
-      // payment went through but we couldn't find an email — log and continue
-      console.error("No email found on capture:", JSON.stringify(capture))
-      res.status(200).json({ success: true, warning: "Payment captured but no email found" })
-      return
-    }
-
-    // generate a unique license serial and save it to the database
-    const serial = await generateOnlineSerial(buyerEmail)
-
-    // email the serial to the buyer
-    await sendLicenseEmail(buyerEmail, serial)
-
-    console.log(`PayPal purchase complete — email: ${buyerEmail}, serial: ${serial}`)
-    res.json({ success: true, serial })
+    capture = await response.json()
   } catch (err) {
-    console.error("PayPal capture-order error:", err)
-    res.status(500).json({ error: "Failed to capture PayPal order" })
+    const body = { error: "PayPal capture failed" }
+    console.error("[paypal/capture]", err)
+    await finalize("failed", body)
+    return res.status(502).json(body)
   }
+
+  if (capture.status !== "COMPLETED") {
+    const body = { error: "Payment not completed" }
+    await finalize("failed", body)
+    return res.status(400).json(body)
+  }
+
+  // Step 2: resolve email
+  const buyerEmail = email || capture.payment_source?.paypal?.email_address || capture.payer?.email_address
+  if (!buyerEmail) {
+    console.error("[paypal/capture] no email found on order", orderID)
+    const body = { success: true, warning: "Payment captured but no email found" }
+    await finalize("complete", body)
+    return res.json(body)
+  }
+
+  // Step 3: issue serial exactly once — DB is source of truth
+  // Check paypal_order_id first (UNIQUE column) as a second safety net
+  // on top of the idempotency middleware.
+  let serial: string
+  try {
+    const existing = await pool.query(`SELECT serial FROM serials WHERE paypal_order_id=$1`, [orderID])
+    serial = existing.rows.length > 0
+      ? existing.rows[0].serial
+      : await generateOnlineSerial(buyerEmail, orderID)
+  } catch (err) {
+    console.error("[paypal/serial]", err)
+    const body = { error: "Failed to issue license" }
+    await finalize("failed", body)
+    return res.status(500).json(body)
+  }
+
+  // Step 4: email (non-fatal — serial is safe in DB, retry worker picks it up if this fails)
+  try {
+    await sendLicenseEmail(buyerEmail, serial)
+    // Mark sent so the retry worker skips this row
+    await pool.query(
+      `UPDATE serials SET email_sent = true WHERE serial = $1`,
+      [serial]
+    )
+  } catch (err) {
+    // email_sent stays false — retry worker will re-attempt every 10 seconds
+    console.error(`[paypal/email] orderID=${orderID}`, err)
+  }
+
+  const body = { success: true, serial }
+  await finalize("complete", body)
+  return res.json(body)
 })
 
 export default router
