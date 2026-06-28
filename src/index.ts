@@ -138,7 +138,7 @@ function scheduleCleanup() {
     }
   }
   run()
-  setInterval(run, 24 * 60 * 60 * 1000)Befgore
+  setInterval(run, 24 * 60 * 60 * 1000)
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────

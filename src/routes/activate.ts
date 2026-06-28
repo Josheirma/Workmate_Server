@@ -4,7 +4,6 @@ import { signLicense } from "../utils/sign"
 
 export async function activateLicense(req: Request, res: Response) {
   const { serial, machineID, email } = req.body
-  const ip = req.ip
   const client = await pool.connect()
 
   try {
@@ -20,12 +19,6 @@ export async function activateLicense(req: Request, res: Response) {
     const record = rows[0]
     const valid  = record && !record.used
     const reason = !record ? "invalid serial" : record.used ? "serial already used" : null
-
-    await client.query(
-      `INSERT INTO activation_logs (serial, machine_id, ip_address, success, reason)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [serial, machineID, ip, valid, reason]
-    )
 
     if (!valid) {
       await client.query("COMMIT")
