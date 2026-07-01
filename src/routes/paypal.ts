@@ -1,9 +1,9 @@
 import { Request, Response, Router } from "express"
 import pool from "../db/pool"
-import { generateOnlineSerial } from "../utils/serial"
-import { sendLicenseEmail } from "../utils/mailer"
 import { idempotencyGuard } from "../middleware/idempotency"
+import { Resend } from "resend"
 
+const resend = new Resend(process.env.RESEND_API_KEY)
 const router = Router()
 
 const PAYPAL_API = process.env.NODE_ENV === "production"
@@ -13,14 +13,12 @@ const PAYPAL_API = process.env.NODE_ENV === "production"
 const CLIENT_ID = process.env.PAYPAL_CLIENT_ID as string
 const SECRET    = process.env.PAYPAL_SECRET    as string
 
-// Cache the access token — valid ~9 hrs, refresh 5 min before expiry.
-// Avoids a redundant auth round-trip on every request.
 let cachedToken:    string | null = null
 let tokenExpiresAt: number        = 0
 
 async function getAccessToken(): Promise<string> {
   if (cachedToken && Date.now() < tokenExpiresAt - 5 * 60 * 1000) return cachedToken
-  const res  = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
+  const res = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -35,7 +33,7 @@ async function getAccessToken(): Promise<string> {
   return cachedToken!
 }
 
-// ─── Create Order — no idempotency needed, PayPal handles it ─────────────────
+// ─── Create Order ─────────────────────────────────────────────────────────────
 router.post("/api/paypal/create-order", async (req: Request, res: Response) => {
   try {
     const token = await getAccessToken()
@@ -56,12 +54,11 @@ router.post("/api/paypal/create-order", async (req: Request, res: Response) => {
   }
 })
 
-// ─── Capture Order — idempotency guard prevents duplicate serials on retries ──
+// ─── Capture Order ────────────────────────────────────────────────────────────
 router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, res: Response) => {
-  const { orderID, email } = req.body
+  const { orderID } = req.body
   const finalize = res.locals.finalizeIdempotency
 
-  // Step 1: verify payment with PayPal
   let capture: any
   try {
     const token = await getAccessToken()
@@ -83,8 +80,14 @@ router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, 
     return res.status(400).json(body)
   }
 
-  // Step 2: resolve email
-  const buyerEmail = email || capture.payment_source?.paypal?.email_address || capture.payer?.email_address
+  const buyerEmail = capture.payment_source?.paypal?.email_address
+    || capture.payer?.email_address
+
+  const payerName = capture.payer?.name
+  const username = payerName
+    ? `${payerName.given_name ?? ""} ${payerName.surname ?? ""}`.trim()
+    : buyerEmail?.split("@")[0] ?? "unknown"
+
   if (!buyerEmail) {
     console.error("[paypal/capture] no email found on order", orderID)
     const body = { success: true, warning: "Payment captured but no email found" }
@@ -92,36 +95,36 @@ router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, 
     return res.json(body)
   }
 
-  // Step 3: issue serial exactly once — DB is source of truth
-  // Check paypal_order_id first (UNIQUE column) as a second safety net
-  // on top of the idempotency middleware.
-  let serial: string
+  // ─── Store in serials ───────────────────────────────────────────────────────
+  let id: number
   try {
-    const existing = await pool.query(`SELECT serial FROM serials WHERE paypal_order_id=$1`, [orderID])
-    serial = existing.rows.length > 0
-      ? existing.rows[0].serial
-      : await generateOnlineSerial(buyerEmail, orderID)
+    const result = await pool.query(
+      `INSERT INTO serials (username, email_address, time_stamp, product_type, email_sent)
+       VALUES ($1, $2, NOW(), 'internet', false) RETURNING id`,
+      [username, buyerEmail.toLowerCase().trim()]
+    )
+    id = result.rows[0].id
   } catch (err) {
-    console.error("[paypal/serial]", err)
-    const body = { error: "Failed to issue license" }
+    console.error("[paypal/db]", err)
+    const body = { error: "Failed to store license" }
     await finalize("failed", body)
     return res.status(500).json(body)
   }
 
-  // Step 4: email (non-fatal — serial is safe in DB, retry worker picks it up if this fails)
+  // ─── Send plain text email ──────────────────────────────────────────────────
   try {
-    await sendLicenseEmail(buyerEmail, serial)
-    // Mark sent so the retry worker skips this row
-    await pool.query(
-      `UPDATE serials SET email_sent = true WHERE serial = $1`,
-      [serial]
-    )
+    await resend.emails.send({
+      from: "onboarding@resend.dev",
+      to: buyerEmail,
+      subject: "Your WorkMate License",
+      text: `Thanks for purchasing WorkMate!\n\nYour license key is: 1111!\n\nKeep this email for your records.`,
+    })
+    await pool.query(`UPDATE serials SET email_sent = true WHERE id = $1`, [id])
   } catch (err) {
-    // email_sent stays false — retry worker will re-attempt every 10 seconds
     console.error(`[paypal/email] orderID=${orderID}`, err)
   }
 
-  const body = { success: true, serial }
+  const body = { success: true, serial: `WM-${id}` }
   await finalize("complete", body)
   return res.json(body)
 })

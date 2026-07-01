@@ -1,5 +1,7 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- MIGRATION 002 — (no-op: email retry columns removed)
--- The serials table only contains id, email, username.
--- Email delivery is handled externally or via PayPal receipt.
+-- MIGRATION 003 — Simplify serials table
+-- Run once:  psql $DATABASE_URL -f src/db/migrations/003_simplify_serials.sql
 -- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE serials DROP COLUMN IF EXISTS retry_count;
+ALTER TABLE serials DROP COLUMN IF EXISTS created_at;

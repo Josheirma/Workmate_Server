@@ -8,9 +8,6 @@ DO $$ BEGIN
   END IF;
 END $$;
 
-GRANT INSERT, SELECT, UPDATE ON serials            TO workmate_app;
-GRANT INSERT                 ON activation_logs    TO workmate_app;
-GRANT INSERT, SELECT, UPDATE ON idempotency_keys   TO workmate_app;
-GRANT INSERT, SELECT, UPDATE ON download_tokens    TO workmate_app;
-GRANT USAGE, SELECT ON SEQUENCE serials_id_seq              TO workmate_app;
-GRANT USAGE, SELECT ON SEQUENCE activation_logs_id_seq      TO workmate_app;
+GRANT INSERT, SELECT, UPDATE ON serials          TO workmate_app;
+GRANT INSERT, SELECT, UPDATE ON idempotency_keys TO workmate_app;
+GRANT USAGE, SELECT ON SEQUENCE serials_id_seq   TO workmate_app;
