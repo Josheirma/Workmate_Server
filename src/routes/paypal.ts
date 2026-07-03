@@ -100,7 +100,7 @@ router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, 
   try {
     const result = await pool.query(
       `INSERT INTO serials (username, email_address, time_stamp, product_type, email_sent)
-       VALUES ($1, $2, NOW(), 'internet', false) RETURNING id`,
+       VALUES ($1, $2, NOW(), 'online', false) RETURNING id`,
       [username, buyerEmail.toLowerCase().trim()]
     )
     id = result.rows[0].id
@@ -117,14 +117,14 @@ router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, 
       from: "onboarding@resend.dev",
       to: buyerEmail,
       subject: "Your WorkMate License",
-      text: `Thanks for purchasing WorkMate!\n\nYour license key is: 1111!\n\nKeep this email for your records.`,
+      text: `Thanks for purchasing WorkMate!\n\nYour online activation code is: 2222\n\nKeep this email for your records.`,
     })
     await pool.query(`UPDATE serials SET email_sent = true WHERE id = $1`, [id])
   } catch (err) {
     console.error(`[paypal/email] orderID=${orderID}`, err)
   }
 
-  const body = { success: true, serial: `WM-${id}` }
+  const body = { success: true, serial: "2222" }
   await finalize("complete", body)
   return res.json(body)
 })
