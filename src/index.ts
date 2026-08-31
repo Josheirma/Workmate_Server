@@ -197,6 +197,30 @@ app.use(
 //     http://localhost:5173
 //
 // That is commonly the Vite development server.
+
+
+//CSP → what resources the browser allows that page to load/use.
+
+// Easy memory trick
+// Security feature	Think
+// CORS	Who can talk to my server?
+// CSP	Where can my page get/use resources?
+
+// And importantly, CORS is primarily about browser cross-origin requests, while CSP is primarily about restricting what the document/page can load or execute.
+
+
+
+//"Requests coming from http://localhost:5173 are allowed to access my API responses."
+
+    //   Is ALLOWED_ORIGIN defined?
+    //    |
+    //    ├── YES → use its value
+    //    |
+    //    └── NO  → use "http://localhost:5173"
+
+    //i.e.  production :  ALLOWED_ORIGIN=https://myapp.com
+
+
 app.use(
     cors({
         origin:
@@ -318,6 +342,63 @@ app.use(
 // PostgreSQL/database work
 //          ↓
 // response
+
+
+
+// On the Express server
+
+// The Express app listens for/handles that POST:
+
+// app.post("/activate", (req, res) => {
+//   // handle the POST
+// });
+
+// So:
+
+// CLIENT                         EXPRESS SERVER
+
+// fetch()                        app.post()
+//   │                                │
+//   │────── POST /activate ─────────>│
+//   │                                │
+//   │                         handles request
+//   │                                │
+//   │<────────── response ───────────│
+
+// POST is an HTTP request method.
+
+// fetch(... method: "POST") → sends a POST
+// app.post(...) → handles a POST
+
+// So if you're asking "where does the POST actually originate?" → the client sends it.
+
+
+// Express creates/provides them when the HTTP request arrives.
+
+// You don't write:
+
+// app.post("/activate", req, res, ...)
+
+// Instead, Express passes them into each middleware function.
+
+
+
+// For example, activateLicense might be:
+
+// export async function activateLicense(
+//   req: Request,
+//   res: Response
+// ) {
+//   const username = req.body.username;
+
+//   res.json({
+//     message: "Activation successful"
+//   });
+// }
+
+
+// middleware activateLicense:  activateLimiter,  validateActivationInput,  activateLicense
+
 app.post(
     "/activate",
 
@@ -406,6 +487,16 @@ const server = app.listen(
 // "server" is the HTTP server returned by app.listen().
 //
 // We listen for errors on that server.
+
+
+// The HTTP server:
+
+// Receives the network request
+// Gives the request to Express
+// Express looks for a matching route:
+
+
+
 server.on(
     "error",
     (err: any) => {

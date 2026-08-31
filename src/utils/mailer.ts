@@ -6,6 +6,31 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
+
+// So the architecture should be:
+
+// paypal.ts
+//    ↓
+// create/store serial with email_sent = false
+//    ↓
+// return success
+
+// emailRetry.ts
+//    ↓
+// find email_sent = false
+//    ↓
+// sendLicenseEmail(...)
+//    ↓
+// Resend
+//    ↓
+// email_sent = true
+
+
+// paypal.ts → creates the purchase/serial and leaves email_sent = false
+// emailRetry.ts → sends the email
+// emailRetry.ts → sets email_sent = true only after successful sending
+// mailer.ts → contains the actual Resend code
+
 export async function sendLicenseEmail(email: string, serial: string) {
   await resend.emails.send({
     from: "onboarding@resend.dev",

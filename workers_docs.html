@@ -1,0 +1,958 @@
+This is solution code for retrying a failed server job with email that was causing 2 emails, everything is safe : db, workwer, resend server  
+
+server/
+│
+├── db/
+│   ├── pool.ts
+│   └── email-outbox.sql
+│
+├── purchase/
+│   └── createPurchase.ts
+│
+├── worker/
+│   ├── claimJob.ts
+│   ├── processJob.ts
+│   └── emailWorker.ts
+│
+├── server.ts
+│
+└── .env
+
+
+
+
+
+
+
+1. db/email-outbox.sql
+
+This is the only new table you need for the email system.
+
+Your existing serials table remains your permanent license/customer table.
+
+-- ============================================================
+    provider_message_id TEXT,
+
+
+
+
+    -- --------------------------------------------------------
+    -- Time Resend successfully accepted the request.
+    -- --------------------------------------------------------
+
+
+    sent_at TIMESTAMPTZ,
+
+
+
+
+    -- --------------------------------------------------------
+    -- Most recent error message.
+    --
+    -- Useful for diagnostics.
+    -- --------------------------------------------------------
+
+
+    last_error TEXT,
+
+
+
+
+    -- --------------------------------------------------------
+    -- CRITICAL:
+    --
+    -- This identifies ONE logical email operation.
+    --
+    -- Every retry of this particular email uses the SAME
+    -- idempotency key.
+    --
+    -- Example:
+    --
+    --     license-email/ABC123
+    --
+    -- Do NOT generate a new random key for every retry.
+    -- --------------------------------------------------------
+
+
+    idempotency_key TEXT NOT NULL UNIQUE,
+
+
+
+
+    -- --------------------------------------------------------
+    -- When the outbox row was created.
+    -- --------------------------------------------------------
+
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+
+
+-- ============================================================
+-- INDEX
+-- ============================================================
+--
+-- The worker frequently asks:
+--
+--     "Give me an email that needs processing."
+--
+-- This index makes that lookup efficient.
+-- ============================================================
+
+
+CREATE INDEX email_outbox_pending_idx
+
+
+ON email_outbox (created_at)
+
+
+WHERE status IN (
+    'pending',
+    'failed'
+);
+2. db/pool.ts
+
+This creates the PostgreSQL connection pool used by both the purchase code and the worker.
+
+// ============================================================
+// db/pool.ts
+// ============================================================
+//
+// PostgreSQL connection pool.
+//
+// Both the purchase server and the worker use this pool.
+//
+// ============================================================
+
+
+import pg from "pg";
+
+
+const { Pool } = pg;
+
+
+
+
+// ============================================================
+// CREATE POOL
+// ============================================================
+//
+// DATABASE_URL should look something like:
+//
+//     postgres://username:password@host:5432/database
+//
+// Keep the actual password in .env, NOT in source code.
+// ============================================================
+
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL
+});
+
+
+
+
+// ============================================================
+// EXPORT
+// ============================================================
+
+
+export default pool;
+3. purchase/createPurchase.ts
+
+This is where the atomic transaction happens.
+
+The key point is:
+
+serial record
++
+email_outbox record
+
+are committed together.
+
+// ============================================================
+                //
+                // Every retry must use this exact same key.
+                // ------------------------------------------------
+
+
+                `license-email/${serial}`
+            ]
+        );
+
+
+
+
+        // ====================================================
+        // STEP 3
+        //
+        // COMMIT BOTH RECORDS.
+        // ====================================================
+        //
+        // Either both inserts become permanent...
+        //
+        //     serials
+        //     email_outbox
+        //
+        // ...or neither becomes permanent.
+        //
+        // ====================================================
+
+
+        await client.query("COMMIT");
+
+
+
+
+        // ====================================================
+        // PURCHASE IS NOW DURABLY RECORDED.
+        // ====================================================
+
+
+        return {
+            success: true,
+            serial
+        };
+
+
+
+
+    } catch (error) {
+
+
+        // ====================================================
+        // SOMETHING FAILED.
+        //
+        // Undo the transaction.
+        // ====================================================
+
+
+        try {
+            await client.query("ROLLBACK");
+        } catch {
+            // PostgreSQL may itself be unavailable.
+            //
+            // The original error is still the important one.
+        }
+
+
+        throw error;
+
+
+
+
+    } finally {
+
+
+        // ----------------------------------------------------
+        // Return the connection to the pool.
+        // ----------------------------------------------------
+
+
+        client.release();
+    }
+}
+This protects against:
+INSERT serial
+      ↓
+PostgreSQL dies
+      ↓
+INSERT email_outbox never happens
+      ↓
+COMMIT never happens
+
+You don't get a committed serial without its email job.
+
+4. worker/claimJob.ts
+
+This is where the worker gets ownership of a job.
+
+The important PostgreSQL mechanism is:
+
+FOR UPDATE SKIP LOCKED
+// ============================================================
+
+
+        if (result.rowCount === 0) {
+
+
+            await client.query("COMMIT");
+
+
+            return null;
+        }
+
+
+
+
+        // ====================================================
+        // WE FOUND A JOB.
+        // ====================================================
+
+
+        const job = result.rows[0];
+
+
+
+
+        // ====================================================
+        // CLAIM IT.
+        // ====================================================
+        //
+        // This changes:
+        //
+        //     pending → sending
+        //
+        // or:
+        //
+        //     failed → sending
+        //
+        // ====================================================
+
+
+        await client.query(
+            `
+            UPDATE email_outbox
+
+
+            SET
+                status = 'sending',
+                attempts = attempts + 1,
+                last_attempt_at = NOW(),
+                last_error = NULL
+
+
+            WHERE id = $1
+            `,
+            [job.id]
+        );
+
+
+
+
+        // ====================================================
+        // COMMIT THE CLAIM.
+        // ====================================================
+
+
+        await client.query("COMMIT");
+
+
+
+
+        // ====================================================
+        // Return the job to the worker.
+        // ====================================================
+
+
+        return job;
+
+
+
+
+    } catch (error) {
+
+
+        await client.query("ROLLBACK");
+
+
+        throw error;
+
+
+
+
+    } finally {
+
+
+        client.release();
+    }
+}
+5. worker/processJob.ts
+
+This is where the worker actually calls Resend.
+
+// ============================================================
+        );
+
+
+
+
+        // ====================================================
+        // DONE
+        // ====================================================
+
+
+        console.log(
+            `Email job ${job.id} marked SENT.`
+        );
+
+
+
+
+    } catch (error) {
+
+
+        // ====================================================
+        // RESEND FAILED
+        // ====================================================
+        //
+        // DO NOT DELETE THE JOB.
+        //
+        // DO NOT mark it sent.
+        //
+        // Leave it in PostgreSQL for another attempt.
+        // ====================================================
+
+
+        const message =
+            error instanceof Error
+                ? error.message
+                : String(error);
+
+
+
+
+        // ====================================================
+        // TRY TO RECORD THE FAILURE.
+        // ====================================================
+
+
+        try {
+
+
+            await pool.query(
+                `
+                UPDATE email_outbox
+
+
+                SET
+                    status = 'failed',
+                    last_error = $1
+
+
+                WHERE id = $2
+                `,
+                [
+                    message,
+                    job.id
+                ]
+            );
+
+
+        } catch (databaseError) {
+
+
+            // =================================================
+            // IMPORTANT:
+            //
+            // If PostgreSQL is ALSO down, we cannot record
+            // "failed".
+            //
+            // That's okay.
+            //
+            // The row is already in PostgreSQL as "sending".
+            //
+            // Once PostgreSQL comes back, the stale-job
+            // mechanism can recover it.
+            // =================================================
+
+
+            console.error(
+                "Could not record email failure:",
+                databaseError
+            );
+        }
+
+
+
+
+        console.error(
+            `Email job ${job.id} failed:`,
+            message
+        );
+    }
+}
+6. worker/emailWorker.ts
+
+This is the actual worker process.
+
+// ============================================================
+
+
+            // =================================================
+            // ASK POSTGRESQL FOR A JOB.
+            // =================================================
+
+
+            const job = await claimJob();
+
+
+
+
+            // =================================================
+            // NOTHING TO DO.
+            // =================================================
+
+
+            if (job === null) {
+
+
+                await sleep(WAIT_MS);
+
+
+                continue;
+            }
+
+
+
+
+            // =================================================
+            // PROCESS THE JOB.
+            //
+            // This calls Resend.
+            //
+            // If Resend succeeds:
+            //
+            //     status → sent
+            //
+            // If Resend fails:
+            //
+            //     status → failed
+            //
+            // =================================================
+
+
+            await processJob(job);
+
+
+
+
+        } catch (error) {
+
+
+            // =================================================
+            // POSTGRESQL FAILURE
+            // =================================================
+            //
+            // Example:
+            //
+            //     PostgreSQL is offline.
+            //
+            // The worker cannot claim a job.
+            //
+            // It does NOT permanently die.
+            //
+            // It waits and tries again.
+            // =================================================
+
+
+            console.error(
+                "Worker cannot reach PostgreSQL:",
+                error
+            );
+
+
+
+
+            await sleep(WAIT_MS);
+        }
+    }
+}
+
+
+
+
+// ============================================================
+// START IT
+// ============================================================
+
+
+startWorker();
+7. server.ts
+
+Your main application server doesn't need to run the worker in the same process.
+
+For example:
+
+// ============================================================
+// server.ts
+// ============================================================
+//
+// Your normal API server.
+//
+// The worker is a separate process.
+//
+// ============================================================
+
+
+import express from "express";
+
+
+import { createPurchase }
+    from "./purchase/createPurchase";
+
+
+
+
+const app = express();
+
+
+app.use(express.json());
+
+
+
+
+// ============================================================
+// PURCHASE ENDPOINT
+// ============================================================
+
+
+app.post(
+    "/purchase",
+    async (req, res) => {
+
+
+        try {
+
+
+            const {
+                serial,
+                email,
+                firstname
+            } = req.body;
+
+
+
+
+            // -----------------------------------------------
+            // Your real application would verify payment
+            // BEFORE doing this.
+            // -----------------------------------------------
+
+
+
+
+            const result =
+                await createPurchase(
+                    serial,
+                    email,
+                    firstname
+                );
+
+
+
+
+            res.json(result);
+
+
+
+
+        } catch (error) {
+
+
+            console.error(error);
+
+
+
+
+            res.status(500).json({
+                success: false
+            });
+        }
+    }
+);
+
+
+
+
+// ============================================================
+// START API SERVER
+// ============================================================
+
+
+app.listen(
+    3000,
+    () => {
+        console.log(
+            "API server running on port 3000."
+        );
+    }
+);
+8. Running the two processes
+
+You have two separate processes:
+
+API SERVER
+server.ts
+    │
+    ↓
+PostgreSQL
+
+and:
+
+WORKER
+emailWorker.ts
+    │
+    ↓
+PostgreSQL
+    │
+    ↓
+Resend
+
+For example:
+
+# Terminal 1
+npm run server
+
+and:
+
+# Terminal 2
+npm run worker
+
+Your package.json could contain:
+
+{
+  "scripts": {
+    "server": "tsx src/server.ts",
+    "worker": "tsx src/worker/emailWorker.ts"
+  }
+}
+What happens during a normal purchase?
+Step 1 — Payment succeeds
+
+Your server generates:
+
+ABC123
+Step 2 — PostgreSQL transaction
+BEGIN
+
+
+serials:
+ABC123 | john@example.com | John
+
+
+email_outbox:
+ABC123 | john@example.com | pending
+
+
+COMMIT
+Step 3 — Worker finds the job
+pending
+   ↓
+sending
+Step 4 — Worker calls Resend
+Worker
+   ↓
+Resend
+   ↓
+accepted
+Step 5 — Same worker updates PostgreSQL
+sending
+   ↓
+sent
+
+Final state:
+
+serials
+────────────────────────────
+ABC123 | john@example.com | John
+
+
+
+
+email_outbox
+────────────────────────────────
+ABC123 | john@example.com | sent
+What if Resend goes down?
+
+The worker does:
+
+sending
+   ↓
+Resend ❌
+   ↓
+failed
+
+The row remains:
+
+ABC123 | john@example.com | failed
+
+The worker continues running.
+
+On its next pass:
+
+failed
+   ↓
+sending
+   ↓
+Resend
+
+If Resend is back:
+
+Resend ✅
+   ↓
+sent
+What if the worker crashes?
+
+Suppose:
+
+pending
+   ↓
+sending
+   ↓
+💥 worker crashes
+
+The PostgreSQL row still exists:
+
+ABC123 | sending
+
+When the worker starts again, the claimJob() query recognizes an old sending row:
+
+status = 'sending'
+AND last_attempt_at < NOW() - INTERVAL '5 minutes'
+
+and reclaims it.
+
+What if the worker crashes at the worst possible moment?
+
+This is the important case:
+
+Worker
+   ↓
+Resend
+   ↓
+ACCEPTED
+   ↓
+💥 worker crashes
+   ↓
+UPDATE email_outbox never happens
+
+The database may still say:
+
+ABC123 | sending
+
+When the worker restarts, it retries the same request with the same idempotency key:
+
+license-email/ABC123
+
+Resend's documentation says that when the same idempotency key is reused with the same payload, the request is treated as the same email operation and the same email ID is returned. Resend currently retains those keys for 24 hours.
+
+So this:
+
+Attempt #1
+license-email/ABC123
+        ↓
+Resend
+
+and:
+
+Attempt #2
+license-email/ABC123
+        ↓
+Resend
+
+are the same logical email operation during that retention window.
+
+What if PostgreSQL goes down?
+
+The worker tries:
+
+claimJob()
+    ↓
+PostgreSQL ❌
+
+The worker catches the error:
+
+catch (error) {
+
+
+    console.error(
+        "Worker cannot reach PostgreSQL:",
+        error
+    );
+
+
+    await sleep(5000);
+}
+
+Then:
+
+wait 5 seconds
+    ↓
+try PostgreSQL
+    ↓
+still down
+    ↓
+wait
+    ↓
+try again
+
+When PostgreSQL comes back:
+
+PostgreSQL ✅
+    ↓
+worker gets pending/failed job
+    ↓
+Resend
+
+The worker itself doesn't need to remember the job. PostgreSQL remembers it.
+
+The complete architecture
+                         CUSTOMER
+                            │
+                            ↓
+                         PAYMENT
+                            │
+                            ↓
+                    ┌───────────────┐
+                    │ API SERVER    │
+                    │               │
+                    │ createPurchase│
+                    └───────┬───────┘
+                            │
+                            ↓
+                 ┌─────────────────────┐
+                 │     PostgreSQL      │
+                 │                     │
+                 │ serials             │
+                 │ ─────────────       │
+                 │ ABC123              │
+                 │ john@example.com    │
+                 │                     │
+                 │ email_outbox        │
+                 │ ─────────────       │
+                 │ ABC123 | pending    │
+                 └──────────┬──────────┘
+                            │
+                            │
+                     ┌──────▼──────┐
+                     │   WORKER    │
+                     │             │
+                     │ claim job   │
+                     │     ↓       │
+                     │ call Resend │
+                     └──────┬──────┘
+                            │
+                            ↓
+                         RESEND
+                            │
+                            ↓
+                         CUSTOMER
+
+The important separation is:
+
+serials = permanent business data.
+
+email_outbox = durable email work.
+
+Worker = processor of that work.
+
+PostgreSQL = durable source of truth and job ownership.
+
+Resend = external email service.
+
+And you don't need a separate licenses table if your existing serials table already contains the serial, email, name, and activation information.
+
+One final caveat: Resend's idempotency protection is 24 hours, not forever. If you want to avoid blindly retrying an unresolved job after that window, your worker should eventually move an ambiguous old job to needs_review rather than automatically send it again.

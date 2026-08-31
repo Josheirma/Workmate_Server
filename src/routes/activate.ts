@@ -33,6 +33,7 @@ import pool from "../db/pool";
 // It is your application's email functionality.
 //
 // It is separate from both Express and PostgreSQL.
+//!!!! - not used
 import { sendLicenseEmail } from "../utils/mailer";
 
 
@@ -79,7 +80,7 @@ export async function activateLicense(
     // already converted the incoming JSON into req.body.
     //
     // For example, Electron might send:
-    //
+    //activateli
     // {
     //     username: "Josh",
     //     email_address: "josh@example.com",
@@ -95,7 +96,7 @@ export async function activateLicense(
         email_address,
         time_stamp,
         product_type,
-        proofofpurchase
+        sent_code
     } = req.body;
 
 
@@ -103,14 +104,16 @@ export async function activateLicense(
     //
     // This is useful while developing/debugging so you can
     // see what the Electron application actually sent.
-    console.log(
-        "!!!!: ",
-        username,
-        email_address,
-        time_stamp,
-        product_type,
-        proofofpurchase
-    );
+    // console.log(
+        
+    //     username,
+    //     email_address,
+    //     "",
+    //     time_stamp,
+    //     product_type,
+    //     sent_code
+            
+    // );
 
 
     // ========================================================
@@ -127,7 +130,7 @@ export async function activateLicense(
     //
     //     " 1111 " → "1111"
     const code =
-        String(proofofpurchase ?? "").trim();
+        String(sent_code ?? "").trim();
 
 
     // Convert email to a string.
@@ -179,13 +182,12 @@ export async function activateLicense(
     //     online + 1111 → invalid
     //
     // The || means "OR".
-    const validPair =
-        (product_type === "box" &&
-            code === "1111") ||
 
-        (product_type === "online" &&
-            code === "2222");
 
+    //!!!!
+    
+
+    /////VALIDATE///
 
 
     // ========================================================
@@ -205,13 +207,15 @@ export async function activateLicense(
     //     success: false,
     //     error: "Invalid activation code"
     // }
-    if (!validPair) {
 
-        return res.json({
-            success: false,
-            error: "Invalid activation code"
-        });
-    }
+
+    // if (!validPair) {
+
+    //     return res.json({
+    //         success: false,
+    //         error: "Invalid activation code"
+    //     });
+    // }
 
 
 
@@ -231,219 +235,6 @@ export async function activateLicense(
     // If an unexpected error escapes the inner code,
     // the catch at the bottom handles it.
     try {
-
-
-
-        // ====================================================
-        // BOX ACTIVATION
-        // ====================================================
-
-        // If this is a physical/box activation, execute this
-        // branch.
-        if (product_type === "box") {
-
-
-            // ------------------------------------------------
-            // REQUIRE USERNAME AND EMAIL
-            // ------------------------------------------------
-
-            // A box activation requires both values.
-            //
-            // !email means email is empty.
-            //
-            // !name means username is empty.
-            //
-            // || means either one being missing causes
-            // rejection.
-            if (!email || !name) {
-
-                return res.json({
-                    success: false,
-                    error:
-                        "Username and email are required to activate"
-                });
-            }
-
-
-
-            // ------------------------------------------------
-            // INSERT ACTIVATION INTO POSTGRESQL
-            // ------------------------------------------------
-
-            // THIS IS WHERE THE BOX ACTIVATION IS SAVED.
-            //
-            // pool.query() sends this SQL to PostgreSQL.
-            //
-            // INSERT means:
-            //
-            //     Create a new database row.
-            //
-            // The table is:
-            //
-            //     serials
-            //
-            // The columns being populated are:
-            //
-            //     username
-            //     email_address
-            //     time_stamp
-            //     product_type
-            //     email_sent
-            //     activated
-            //
-            // $1, $2, $3, $4 are PostgreSQL parameters.
-            //
-            // They correspond to:
-            //
-            // $1 → name
-            // $2 → email
-            // $3 → time_stamp
-            // $4 → product_type
-            //
-            // This is a parameterized query, which is important
-            // for preventing SQL injection.
-            //
-            // RETURNING id tells PostgreSQL:
-            //
-            //     "After inserting the row, give me its id."
-            const insertResult = await pool.query(
-                `
-                INSERT INTO serials
-                (
-                    username,
-                    email_address,
-                    time_stamp,
-                    product_type,
-                    email_sent,
-                    activated
-                )
-                VALUES
-                (
-                    $1,
-                    $2,
-                    $3,
-                    $4,
-                    false,
-                    true
-                )
-                RETURNING id
-                `,
-                [
-                    name,
-                    email,
-                    time_stamp,
-                    product_type
-                ]
-            );
-
-
-
-            // ------------------------------------------------
-            // GET THE NEW DATABASE ID
-            // ------------------------------------------------
-
-            // PostgreSQL returned the newly inserted row.
-            //
-            // insertResult.rows is an array of returned rows.
-            //
-            // Because we inserted one row:
-            //
-            //     rows[0]
-            //
-            // is the new row.
-            //
-            // .id gets its database ID.
-            const id =
-                insertResult.rows[0].id;
-
-
-
-            // Print confirmation to the server console.
-            console.log(
-                `[activate] new box serial saved — ` +
-                `id=${id} email=${email}`
-            );
-
-
-
-            // =================================================
-            // SEND LICENSE EMAIL
-            // =================================================
-
-            // Email sending is a SECOND operation after the
-            // database INSERT.
-            //
-            // Notice that this has its own try/catch.
-            //
-            // Why?
-            //
-            // Because we don't want an email failure to undo
-            // the successful database activation.
-            try {
-
-                // Send the license email.
-                //
-                // The email receives:
-                //
-                //     customer's email
-                //     license/serial ID
-                await sendLicenseEmail(
-                    email,
-                    String(id)
-                );
-
-
-                // If the email succeeded, update PostgreSQL.
-                //
-                // We change email_sent from false → true.
-                await pool.query(
-                    `
-                    UPDATE serials
-                    SET email_sent = true
-                    WHERE id = $1
-                    `,
-                    [id]
-                );
-
-
-            } catch (err) {
-
-                // If sending the email failed, log the error.
-                //
-                // IMPORTANT:
-                //
-                // The activation itself is still saved.
-                //
-                // email_sent remains false.
-                //
-                // That allows your retry worker to potentially
-                // send the email later.
-                console.error(
-                    `[activate] email failed, will retry — ` +
-                    `id=${id}`,
-                    err
-                );
-            }
-
-
-
-            // ------------------------------------------------
-            // TELL ELECTRON ACTIVATION SUCCEEDED
-            // ------------------------------------------------
-
-            // Send JSON back to the Electron application.
-            //
-            // The Electron fetch() receives:
-            //
-            // {
-            //     success: true
-            // }
-            return res.json({
-                success: true
-            });
-        }
-
-
 
         // ====================================================
         // ONLINE ACTIVATION
@@ -479,39 +270,45 @@ export async function activateLicense(
         // for ONE particular row.
         //
         // The row is selected by the subquery below.
-        const claim = await pool.query(
-            `
-            UPDATE serials
 
-            SET activated = true
 
-            WHERE id = (
 
-                SELECT id
+        // has an unactivated record (online)
+        //!!!! - product_tpe removed
 
-                FROM serials
+        //  RETURNING
+        //         id,
+        //         username,
+        //         email_address
+        //     `,
+        //     //!!!!
+        //     []
 
-                WHERE product_type = 'online'
+        //!!!! email_sent?
+    const claim = await pool.query(
+    `
 
-                  AND email_sent = true
 
-                  AND activated = false
+    
+    UPDATE serials
+    SET activated = true
 
-                ORDER BY id ASC
+    WHERE id = (
+        SELECT id
+        FROM serials
+        WHERE code = $1
+          
 
-                LIMIT 1
+        ORDER BY id ASC
+        LIMIT 1
 
-                FOR UPDATE SKIP LOCKED
-            )
+        FOR UPDATE SKIP LOCKED
+    )
 
-            RETURNING
-                id,
-                username,
-                email_address
-            `,
-            []
-        );
-
+    RETURNING id
+    `,
+    [code]
+);
 
 
         // ====================================================
@@ -588,11 +385,11 @@ export async function activateLicense(
 
 
         // Log the successful online activation.
-        console.log(
-            `[activate] online license claimed — ` +
-            `id=${claimed.id} ` +
-            `email=${claimed.email_address}`
-        );
+        // console.log(
+        //     `[activate] online license claimed — ` +
+        //     `id=${claimed.id} ` +
+        //     `email=${claimed.email_address}`
+        // );
 
 
 
@@ -606,8 +403,10 @@ export async function activateLicense(
         // and email that were ALREADY stored in PostgreSQL.
         return res.json({
             success: true,
-            username: claimed.username,
-            email: claimed.email_address
+            "returned success": true
+            //,
+            //username: claimed.username,
+            //email: claimed.email_address
         });
 
 

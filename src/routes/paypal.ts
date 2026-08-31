@@ -2,8 +2,10 @@ import { Request, Response, Router } from "express"
 import pool from "../db/pool"
 import { idempotencyGuard } from "../middleware/idempotency"
 import { Resend } from "resend"
+import { sendLicenseEmail } from "../utils/mailer"
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+
+//const resend = new Resend(process.env.RESEND_API_KEY)
 const router = Router()
 
 const PAYPAL_API = process.env.NODE_ENV === "production"
@@ -34,6 +36,7 @@ async function getAccessToken(): Promise<string> {
 }
 
 // ─── Create Order ─────────────────────────────────────────────────────────────
+//prepare purchase
 router.post("/api/paypal/create-order", async (req: Request, res: Response) => {
   try {
     const token = await getAccessToken()
@@ -111,22 +114,27 @@ router.post("/api/paypal/capture-order", idempotencyGuard, async (req: Request, 
     return res.status(500).json(body)
   }
 
-  // ─── Send plain text email ──────────────────────────────────────────────────
-  try {
-    await resend.emails.send({
-      from: "onboarding@resend.dev",
-      to: buyerEmail,
-      subject: "Your WorkMate License",
-      text: `Thanks for purchasing WorkMate!\n\nYour online activation code is: 2222\n\nKeep this email for your records.`,
-    })
-    await pool.query(`UPDATE serials SET email_sent = true WHERE id = $1`, [id])
-  } catch (err) {
-    console.error(`[paypal/email] orderID=${orderID}`, err)
-  }
+// ─── Send plain text email ──────────────────────────────────────────────────
 
-  const body = { success: true, serial: "2222" }
-  await finalize("complete", body)
-  return res.json(body)
-})
+//THIS SORT OF THING IS IN THE WORKER ONLY:  mailer.ts / emailRetry.ts
+
+//   try {
+
+//     await sendLicenseEmail(buyerEmail, id)
+//     // await resend.emails.send({
+//     //   from: "onboarding@resend.dev",
+//     //   to: buyerEmail,
+//     //   subject: "Your WorkMate License",
+//     //   text: `Thanks for purchasing WorkMate!\n\nYour online activation code is: 2222\n\nKeep this email for your records.`,
+//     // })
+//     await pool.query(`UPDATE serials SET email_sent = true WHERE id = $1`, [id])
+//   } catch (err) {
+//     console.error(`[paypal/email] orderID=${orderID}`, err)
+//   }
+
+//   const body = { success: true, serial: id }
+//   await finalize("complete", body)
+//   return res.json(body)
+// })
 
 export default router
