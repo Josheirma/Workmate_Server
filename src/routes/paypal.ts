@@ -2,7 +2,7 @@ import { Request, Response, Router } from "express"
 import pool from "../db/pool"
 import { idempotencyGuard } from "../middleware/idempotency"
 import { Resend } from "resend"
-import { sendLicenseEmail } from "../utils/mailer"
+//import { sendLicenseEmail } from "../utils/mailer"
 
 
 //const resend = new Resend(process.env.RESEND_API_KEY)

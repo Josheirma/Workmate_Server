@@ -34,7 +34,7 @@ import pool from "../db/pool";
 //
 // It is separate from both Express and PostgreSQL.
 //!!!! - not used
-import { sendLicenseEmail } from "../utils/mailer";
+//import { sendLicenseEmail } from "../utils/mailer";
 
 
 
